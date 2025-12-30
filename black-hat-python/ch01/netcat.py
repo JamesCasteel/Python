@@ -1,47 +1,46 @@
-import argparse
-import socket
-import shlex
-import subprocess
-import sys
-import textwrap
-import threading
-from urllib import response
+import argparse #Purpose: Parse command-line flags like -l, -p, -t, -c, -e, -u.
+import socket   # Purpose: Create TCP sockets, connect/listen, send/recv bytes.
+import shlex    # Purpose: Split a command string safely into argv pieces (handles quoting).
+import subprocess # Purpose: Run OS commands when you use -e or -c modes.
+import sys      # Purpose: Read stdin for piped input; exit cleanly.
+import textwrap # Purpose: Format the help text (epilog) nicely.
+import threading  # Purpose: Handle multiple incoming clients concurrently in listen mode.
 
-def execute(cmd):
-    cmd = cmd.strip()
-    if not cmd:
+
+def execute(cmd):       # Purpose: Given a text command (like "whoami"), run it on the local OS and return its stdout as a string.
+    cmd = cmd.strip()   # Purpose: Remove leading/trailing whitespace/newlines so blank/space-only commands don’t get executed.
+    if not cmd:         # Purpose: If the command is empty after stripping, do nothing
         return
-    output = subprocess.check_output(shlex.split(cmd), stderr=subprocess.STDOUT)
-    return output.decode()
+    output = subprocess.check_output(shlex.split(cmd), stderr=subprocess.STDOUT)    # Purpose: Run the command and capture output. shlex.split(cmd) turns "cat /etc/passwd" into ["cat","/etc/passwd"]. stderr redirected into stdout so you get errors too.
+    return output.decode() # Purpose: Convert bytes -> string for printing/sending.
 
 class NetCat:
-    def __init__(self, args, buffer=None):
-        self.args = args
-        self.buffer = buffer
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    def __init__(self, args, buffer=None):   # Purpose: Bundle all netcat behaviors (client, listener, upload, command shell) into one object.
+        self.args = args                     # Purpose: Keep CLI options accessible everywhere.
+        self.buffer = buffer                 # Purpose: Hold any initial bytes to send (usually from stdin pipe).
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # Purpose: Create an IPv4 TCP socket. AF_INET = IPv4 addressing (e.g. 127.0.0.1). SOCK_STREAM = TCP (reliable stream), not UDP.
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)    # Purpose: Allow re-binding to the same port quickly after restart. SOL_SOCKET = “socket-level options”. SO_REUSEADDR = “let me reuse the address/port”. 
 
-    def run(self):
-        if self.args.listen:
+    def run(self):                      # Purpose: Decide if we’re acting like a server (-l) or a client.
+        if self.args.listen:            # Purpose: If -l specified, we wait for inbound connections.
             self.listen()
-        else:
+        else:                           # Purpose: Otherwise, we connect out to a target and talk.
             self.send()
-            print(response, end='')
 
-    def send(self):
-        self.socket.connect((self.args.target, self.args.port))
-        if self.buffer:
+
+    def send(self):                                                # Purpose: Client mode: connect to target, optionally send initial data, then loop receiving output + sending user input.
+        self.socket.connect((self.args.target, self.args.port))    # Purpose: Establish a TCP connection to target:port.
+        if self.buffer:                                            # Purpose: If we were given initial data (piped stdin), send it once.
             self.socket.send(self.buffer)
-
-        try:
+        try:                                                       # Purpose: Keep the client interactive loop running until Ctrl+C.
             while True:
-                recv_len = 1
-                response = ''
-                while recv_len:
-                    data = self.socket.recv(4096)
-                    recv_len = len(data)
-                    response += data.decode()
-                    if recv_len < 4096:
+                recv_len = 1                                       # Purpose: Seed value so inner "while recv_len" runs at least once.
+                response = ''                                      # Purpose: Accumulate everything the remote side sends us.
+                while recv_len:                                    # Purpose: Keep receiving until remote sends less than 4096 bytes.
+                    data = self.socket.recv(4096)                  # Purpose: Read up to 4096 bytes from the socket.
+                    recv_len = len(data)                           # Purpose: If 0, connection closed; if <4096, likely end of burst.?????If 0 close connection?
+                    response += data.decode()                      # Purpose: Convert bytes->string and append to full response.
+                    if recv_len < 4096:                            # Purpose: Heuristic: if we got a “short” read, stop reading for now.
                         break
                 if response:
                     print(response)
