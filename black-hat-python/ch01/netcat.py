@@ -6,7 +6,6 @@ import sys      # Purpose: Read stdin for piped input; exit cleanly.
 import textwrap # Purpose: Format the help text (epilog) nicely.
 import threading  # Purpose: Handle multiple incoming clients concurrently in listen mode.
 
-
 def execute(cmd):       # Purpose: Given a text command (like "whoami"), run it on the local OS and return its stdout as a string.
     cmd = cmd.strip()   # Purpose: Remove leading/trailing whitespace/newlines so blank/space-only commands don’t get executed.
     if not cmd:         # Purpose: If the command is empty after stripping, do nothing
@@ -27,7 +26,6 @@ class NetCat:
         else:                           # Purpose: Otherwise, we connect out to a target and talk.
             self.send()
 
-
     def send(self):                                                # Purpose: Client mode: connect to target, optionally send initial data, then loop receiving output + sending user input.
         self.socket.connect((self.args.target, self.args.port))    # Purpose: Establish a TCP connection to target:port.
         if self.buffer:                                            # Purpose: If we were given initial data (piped stdin), send it once.
@@ -42,63 +40,66 @@ class NetCat:
                     response += data.decode()                      # Purpose: Convert bytes->string and append to full response.
                     if recv_len < 4096:                            # Purpose: Heuristic: if we got a “short” read, stop reading for now.
                         break
-                if response:
-                    print(response)
-                    buffer = input('> ')
-                    buffer += '\n'
-                    self.socket.send(buffer.encode())
-        except KeyboardInterrupt:
+                if response:                                       # Purpose: Only print and prompt if we actually received something.
+                    print(response, end='')                        # Purpose: Show the remote output to the user.
+                    buffer = input('> ')                           # Purpose: Get the next command line from the user.
+                    buffer += '\n'                                 # Purpose: Remote shell expects newline-terminated commands.
+                    self.socket.send(buffer.encode())              # Purpose: Send your command to the other side.
+        except KeyboardInterrupt:                                  # Purpose: Allow clean exit on Ctrl+C without a nasty traceback.
             print("User terminated.")
             self.socket.close()
             sys.exit()
 
-    def listen(self):
-        self.socket.bind((self.args.target, self.args.port))
-        self.socket.listen(5)
-        while True:
-            client_socket, _ = self.socket.accept()
-            client_thread = threading.Thread(
-                target=self.handle, args=(client_socket,)
-            )
+    def listen(self):                                              # Purpose: Server mode: bind, listen, accept connections, spin off handler threads.       
+        self.socket.bind((self.args.target, self.args.port))       # Purpose: Attach socket to local IP:port. (Usually target should be 0.0.0.0 in listen mode.)
+        self.socket.listen(5)                                      # Purpose: Start listening; backlog queue size 5.
+        while True:                                                # Purpose: Accept clients forever.
+            client_socket, _ = self.socket.accept()                # Purpose: Block until a client connects; get a new per-client socket.
+            client_thread = threading.Thread(                      
+                target=self.handle, args=(client_socket,)          
+            )                                                      # Purpose: Run per-client logic in a separate thread so multiple clients work.
             client_thread.start()
 
-    def handle(self, client_socket):
-        if self.args.execute:
+    def handle(self, client_socket):                               # Purpose: What to do with each incoming client connection, depending on -e (execute), -u (upload), or -c (command shell).
+        if self.args.execute:                                      # Purpose: One-shot: run a command immediately when someone connects.
             output = execute(self.args.execute)
             client_socket.send(output.encode())
 
-        elif self.args.upload:
+        elif self.args.upload:                                     # Purpose: Receive bytes from client and save to a file locally.
             file_buffer = b''
             while True:
                 data = client_socket.recv(4096)
                 if data:
                     file_buffer += data
                 else:
-                    break
+                    break                                          # Purpose: Read until the client stops sending (recv returns b'').
 
             with open(self.args.upload, 'wb') as f:
-                f.write(file_buffer)
+                f.write(file_buffer)                               # Purpose: Save what we received to disk.
             message = f'Saved file {self.args.upload}'
             client_socket.send(message.encode())
 
-        elif self.args.command:
+        elif self.args.command:                                    # Purpose: Interactive shell: prompt the client, read a command, execute locally, send results back, repeat.
             cmd_buffer = b''
             while True:
                 try:
-                    client_socket.send(b"<BHP:#> ")
+                    client_socket.send(b"<BHP:#> ")                # Purpose: Show a prompt on the client side.
                     while b'\n' not in cmd_buffer:
-                        cmd_buffer += client_socket.recv(64)
-                    response = execute(cmd_buffer.decode())
+                        cmd_buffer += client_socket.recv(64)       # Purpose: Read until we get a full line command.
+                    response = execute(cmd_buffer.decode())        # Purpose: Execute the received command locally.
                     if response:
-                        client_socket.send(response.encode())
-                    cmd_buffer = b''
+                        client_socket.send(response.encode())      # Purpose: Send command output back to the client.
+                    cmd_buffer = b''                               # Purpose: Reset buffer for the next command.
                 except Exception as e:
-                    print(f"Server killed {e}")
-                    self.socket.close()
-                    sys.exit()
+                    print(f"[client] error: {e}")
+                    try:
+                        client_socket.close()
+                    except:
+                        pass
+                    return   # end this client thread, keep server alive
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+if __name__ == "__main__":                                         # Purpose: This is the “main block”. It runs only when you execute this file directly
+    parser = argparse.ArgumentParser(                              # Purpose: Define CLI interface (flags/options).
         description="Netcat-like tool for network communication and command execution",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent('''Example usage:
@@ -111,19 +112,19 @@ if __name__ == "__main__":
         ),
     )
 
-    parser.add_argument('-c', '--command', action='store_true', help='Initialize a command shell')
-    parser.add_argument('-e', '--execute', help='Execute specified command upon receiving a connection')
-    parser.add_argument('-l', '--listen', action='store_true', help='Listen for incoming connections')
-    parser.add_argument('-p', '--port', type=int, default=5555, help='Specify the port to listen on or connect to')
-    parser.add_argument('-t', '--target', default='192.168.1.203', help='Specify the target host IP')
-    parser.add_argument('-u', '--upload', help='Specify the file to upload')
+    parser.add_argument('-c', '--command', action='store_true', help='Initialize a command shell')                      # Purpose: Enable interactive remote shell mode on the listener.
+    parser.add_argument('-e', '--execute', help='Execute specified command upon receiving a connection')                # Purpose: One-shot execute mode on connect.
+    parser.add_argument('-l', '--listen', action='store_true', help='Listen for incoming connections')                  # Purpose: Server mode.
+    parser.add_argument('-p', '--port', type=int, default=5555, help='Specify the port to listen on or connect to')     # Purpose: Port setting.
+    parser.add_argument('-t', '--target', default='192.168.1.203', help='Specify the target host IP')                   # Purpose: IP to connect to (client) OR bind to (listener).
+    parser.add_argument('-u', '--upload', help='Specify the file to upload')                                            # Purpose: File write destination on listener.
 
-    args = parser.parse_args()
+    args = parser.parse_args()                                    # Purpose: Actually read CLI inputs into args.
     
     if args.listen:
-        buffer = ''
+        buffer = ''                                               # Purpose: Listener doesn’t read stdin as initial payload.
     else:
-        buffer = sys.stdin.read()
+        buffer = sys.stdin.read()                                 # Purpose: Client mode can accept piped data and send it immediately.
 
-    nc = NetCat(args, buffer.encode())
-    nc.run()
+    nc = NetCat(args, buffer.encode())                            # Purpose: Build tool with options + initial payload bytes. Note: In listen mode, buffer is '' so buffer.encode() becomes b'' (fine).
+    nc.run()                                                      # Purpose: Start it.
